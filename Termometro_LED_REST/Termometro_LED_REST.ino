@@ -18,6 +18,7 @@
 // Valor da resistencia utilizada no divisor de tensao (para temperatura ambiente, qualquer resistencia entre 470 e 2k2 pode ser usada)
 #define RESISTOR 470   
 
+//Inserindo dados dos LEDs
 #define PIN01 D1
 #define PIN02 D2
 #define PIN03 D3
@@ -46,8 +47,8 @@ char bufferJ[256];
 char *mensagem;
 String payload;
 int httpCode = 0;
-uint64_t timestamp = 0;
-uint64_t last_timestamp = 0;
+unsigned long long timestamp = 0;
+unsigned long long last_timestamp = 0;
 
 //Variaveis do termometro
 float temperature;
@@ -70,27 +71,28 @@ char *jsonMQTTmsgDATA(const char *device_id, const char *metric, float value) {
 //E outra funcao para ler os dados
 float jsonMQTT_temperature_msg(String msg)
 {
-   const int capacity = JSON_ARRAY_SIZE(1) + 3*JSON_OBJECT_SIZE(2) + 2*JSON_OBJECT_SIZE(3) + 190;
-   float temperatura;
-   //msg = msg.substring(1,msg.length()-1);
-   StaticJsonDocument<capacity> jsonMSG;
-   DeserializationError err = deserializeJson(jsonMSG, msg);
-   if (err)
-   {
-     Serial.print("ERRO: ");
-     Serial.println(err.c_str());
-     return 0;
-   }
-   JsonObject root_0_data = jsonMSG[0]["data"]; 
-   temperatura = root_0_data["value"].as<float>(); 
-   JsonObject root_0_meta = jsonMSG[0]["meta"];
-   timestamp = root_0_meta["timestamp"].as<unsigned long long>();
+  StaticJsonDocument<384> doc;
+
+  DeserializationError error = deserializeJson(doc, msg);
+  
+  if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+    return -1000;
+  }
+  
+  JsonObject root_0_meta = doc[0]["meta"];
+  timestamp = root_0_meta["timestamp"]; 
+  
+  JsonObject root_0_data = doc[0]["data"];
+  float temperature = root_0_data["value"]; 
    
-   return temperatura;
+  return temperature;
 }
 //Criando os objetos de conexão com a rede e com o servidor HTTP.
 WiFiClient espClient;
-HTTPClient http;
+HTTPClient http_p;
+HTTPClient http_g;
 
 void setup_wifi() {
   delay(10);
@@ -111,36 +113,39 @@ void setup_wifi() {
   Serial.println("WiFi conectado");
   Serial.println("Endereco de IP: ");
   Serial.println(WiFi.localIP());
-  http.begin("data.demo.konkerlabs.net",80,http_subscription_url);
-  httpCode = http.GET();
-  if (httpCode>0) {
-    payload = http.getString();
-    received_temperature = jsonMQTT_temperature_msg(payload);
-    last_timestamp = timestamp;
-  }
 }
 
 void setup()
 {
   //Configurando a porta Serial e escolhendo o servidor MQTT
   Serial.begin(115200);
+  pinMode(PIN01, OUTPUT);
+  pinMode(PIN02, OUTPUT);
+  pinMode(PIN03, OUTPUT);
+  digitalWrite(PIN01, LOW);
+  digitalWrite(PIN02, LOW);
+  digitalWrite(PIN03, LOW);
   setup_wifi();
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Accept", "application/json");
-  http.setAuthorization(USER, PWD);
+  http_p.begin(espClient,"data.demo.konkerlabs.net",80,http_publication_url);
+  http_g.begin(espClient,"data.demo.konkerlabs.net",80,http_subscription_url);
+  http_p.addHeader("Content-Type", "application/json");
+  http_p.addHeader("Accept", "application/json");
+  http_p.setAuthorization(USER, PWD);
+  http_g.addHeader("Content-Type", "application/json");
+  http_g.addHeader("Accept", "application/json");
+  http_g.setAuthorization(USER, PWD);
   
 }
 
 void loop()
 {
-  //O programa em si eh muito simples: 
+ 
   if (WiFi.status() != WL_CONNECTED) {
     setup_wifi();
   }
   
-  tensao = 0;
-  
   //Tirando a media do valor lido no ADC
+  tensao = 0;
   for (i=0; i< AMOSTRAS; i++) {
    tensao += analogRead(0)/AMOSTRAS;
    delay(10);
@@ -156,38 +161,35 @@ void loop()
   Serial.println(temperature);
   
   mensagem = jsonMQTTmsgDATA("My_favorite_thermometer", "Celsius", temperature);
-  //Enviando via MQTT o resultado calculado da temperatura
-  http.begin("data.demo.konkerlabs.net",80,http_publication_url);
-  httpCode=http.POST(mensagem);
+  
+  //Enviando via HTTP o resultado calculado da temperatura
+  httpCode=http_p.POST(mensagem);
   Serial.print("Codigo de resposta: ");
   Serial.println(httpCode);
-  http.end();
-  http.begin("data.demo.konkerlabs.net",80,http_subscription_url);
-  httpCode = http.GET();
+  
+  //Agora vamos consultar na plataforma via HTTP
+  httpCode = http_g.GET();
   if (httpCode>0){
-    payload = http.getString();
+    payload = http_g.getString();
+    Serial.print("Mensagem recebida da plataforma: ");
+    Serial.println(payload); 
     received_temperature = jsonMQTT_temperature_msg(payload);
-    if (timestamp > last_timestamp){
-      Serial.print("Mensagem recebida da plataforma: ");
-      Serial.println(payload); 
-      if (received_temperature>10.0) digitalWrite(PIN01, HIGH);
-        else digitalWrite(PIN01, LOW);
-      if (received_temperature>20.0) digitalWrite(PIN02, HIGH);
-        else digitalWrite(PIN02, LOW);
-      if (received_temperature>30.0) digitalWrite(PIN03, HIGH);
-        else digitalWrite(PIN03, LOW);
-    last_timestamp = timestamp;
+    if (received_temperature > -999){
+      if (timestamp > last_timestamp){
+        if (received_temperature>10.0) digitalWrite(PIN01, HIGH);
+          else digitalWrite(PIN01, LOW);
+        if (received_temperature>18.0) digitalWrite(PIN02, HIGH);
+          else digitalWrite(PIN02, LOW);
+        if (received_temperature>25.0) digitalWrite(PIN03, HIGH);
+          else digitalWrite(PIN03, LOW);
+      last_timestamp = timestamp;
+      }
+      else{
+            digitalWrite(PIN01, LOW);
+            digitalWrite(PIN02, LOW);
+            digitalWrite(PIN03, LOW);
+      }
     }
-    else{
-          digitalWrite(PIN01, LOW);
-          digitalWrite(PIN02, LOW);
-          digitalWrite(PIN03, LOW);
-    }
-  }
-  else{
-    digitalWrite(PIN01, LOW);
-    digitalWrite(PIN02, LOW);
-    digitalWrite(PIN03, LOW);
   }
   Serial.println("");
   //Gerando um delay de 2 segundos antes do loop recomecar
